@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  invoice-intelligence:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: invoice-intelligence-api
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=/app/data/production_memory.db
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      - THRESHOLD_AUTO_ACCEPT=${THRESHOLD_AUTO_ACCEPT:-0.85}
+      - THRESHOLD_AUTO_CORRECT=${THRESHOLD_AUTO_CORRECT:-0.65}
+      - THRESHOLD_ESCALATE=${THRESHOLD_ESCALATE:-0.4}
+      - THRESHOLD_MEMORY_APPLICATION=${THRESHOLD_MEMORY_APPLICATION:-0.5}
+      - MEMORY_DECAY_RATE=${MEMORY_DECAY_RATE:-0.95}
+      - MEMORY_MAX_INCREASE=${MEMORY_MAX_INCREASE:-0.1}
+      - MEMORY_MIN_CONFIDENCE=${MEMORY_MIN_CONFIDENCE:-0.1}
+      - MEMORY_MAX_CONFIDENCE=${MEMORY_MAX_CONFIDENCE:-0.95}
+      - MEMORY_DECAY_AFTER_DAYS=${MEMORY_DECAY_AFTER_DAYS:-7}
+      - RATE_LIMIT_WINDOW_MS=${RATE_LIMIT_WINDOW_MS:-900000}
+      - RATE_LIMIT_MAX=${RATE_LIMIT_MAX:-100}
+      - MAX_REQUEST_SIZE=${MAX_REQUEST_SIZE:-10mb}
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-50}
+    volumes:
+      - invoice_data:/app/data
+    networks:
+      - invoice_network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Add a reverse proxy for production
+  nginx:
+    image: nginx:alpine
+    container_name: invoice-intelligence-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - invoice-intelligence
+    networks:
+      - invoice_network
+    profiles:
+      - production
+
+  # Optional: Add monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: invoice-intelligence-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - invoice_network
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: invoice-intelligence-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    networks:
+      - invoice_network
+    profiles:
+      - monitoring
+
+volumes:
+  invoice_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  invoice_network:
+    driver: bridge
